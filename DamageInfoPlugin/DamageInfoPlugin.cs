@@ -123,7 +123,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 					_ignoredCastActions.Add(row.ActionCategory.RowId);
 			}
 
-			var receiveActionEffectFuncPtr = DalamudApi.SigScanner.ScanText("40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24");
+			var receiveActionEffectFuncPtr = DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 00 05 00 00");
 			_receiveActionEffectHook = DalamudApi.Hooks.HookFromAddress<ReceiveActionEffectDelegate>(receiveActionEffectFuncPtr, ReceiveActionEffect);
 
 			var addScreenLogPtr = DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? BF ?? ?? ?? ?? EB 39");
@@ -457,7 +457,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 
 	private uint GetCharacterActorId()
 	{
-		return DalamudApi.ClientState.LocalPlayer?.EntityId ?? 0;
+		return DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0;
 	}
 
 	private SeString GetActorName(uint id)
@@ -506,7 +506,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 						if (_posManager.IsPositionalHit(effectHeader->AnimationId, effectArray[i].param2))
 							positionalState = PositionalState.Success;
 
-				if (DalamudApi.ClientState.LocalPlayer?.EntityId == sourceCharacter->EntityId) {
+				if (DalamudApi.ObjectTable.LocalPlayer?.EntityId == sourceCharacter->EntityId) {
 					if (positionalState is PositionalState.Success) 
 					{
 						_positionalsHit++;
@@ -570,7 +570,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 
 	private int GetCurrentLevel()
 	{
-		return DalamudApi.ClientState.LocalPlayer?.Level ?? -1;
+		return DalamudApi.ObjectTable.LocalPlayer?.Level ?? -1;
 	}
 
 	private void AddScreenLogDetour(
