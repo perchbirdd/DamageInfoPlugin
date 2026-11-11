@@ -10,6 +10,7 @@ public class DalamudApi
 {
     public static void Initialize(IDalamudPluginInterface pluginInterface) => pluginInterface.Create<DalamudApi>();
 
+    [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null;
     // [PluginService] public static IAetheryteList AetheryteList { get; private set; } = null;
     // [PluginService] public static IBuddyList BuddyList { get; private set; } = null;    
     [PluginService] public static IChatGui ChatGui { get; private set; } = null;
@@ -31,7 +32,6 @@ public class DalamudApi
     [PluginService] public static IObjectTable ObjectTable { get; private set; } = null;
     // [PluginService] public static IPartyFinderGui PartyFinderGui { get; private set; } = null;
     // [PluginService] public static IPartyList PartyList { get; private set; } = null;
-    [PluginService] public static ISigScanner SigScanner { get; private set; } = null;
     [PluginService] public static ITargetManager TargetManager { get; private set; } = null;
     // [PluginService] public static IToastGui ToastGui { get; private set; } = null;
     [PluginService] public static IGameInteropProvider Hooks { get; private set; } = null;

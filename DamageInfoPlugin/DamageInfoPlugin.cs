@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Game;
+using Dalamud.Game.Addon.Lifecycle;
+using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.Gui.FlyText;
@@ -17,8 +19,9 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using Dalamud.Bindings.ImGui;
 using static DamageInfoPlugin.LogType;
 using Action = Lumina.Excel.Sheets.Action;
-using Character = FFXIVClientStructs.FFXIV.Client.Game.Character.Character;
-using DObjectKind = Dalamud.Game.ClientState.Objects.Enums.ObjectKind;
+using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Object;
 
 namespace DamageInfoPlugin;
 
@@ -41,25 +44,12 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 	private readonly Configuration _configuration;
 	private readonly PluginUI _ui;
 
-	private delegate void AddScreenLogDelegate(
-		Character* target,
-		Character* source,
-		FlyTextKind logKind,
-		int option,
-		int actionKind,
-		int actionId,
-		int val1,
-		int val2,
-		int val3,
-		int val4);
+	private const string TargetInfoAddonName = "_TargetInfo";
+	private const string TargetInfoSplitAddonName = "_TargetInfoCastBar";
+	private const string FocusTargetInfoAddonName = "_FocusTargetInfo";
 
-	private delegate void ReceiveActionEffectDelegate(uint sourceId, Character* sourceCharacter, IntPtr pos, EffectHeader* effectHeader, EffectEntry* effectArray, ulong* effectTail);
-	private delegate void SetCastBarDelegate(IntPtr thisPtr, IntPtr a2, IntPtr a3, IntPtr a4, char a5);
-
-	private readonly Hook<AddScreenLogDelegate> _addScreenLogHook;
-	private readonly Hook<ReceiveActionEffectDelegate> _receiveActionEffectHook;
-	private readonly Hook<SetCastBarDelegate> _setCastBarHook;
-	private readonly Hook<SetCastBarDelegate> _setFocusTargetCastBarHook;
+	private readonly Hook<BattleLog.Delegates.AddToScreenLogWithScreenLogKind> _addScreenLogHook;
+	private readonly Hook<ActionEffectHandler.Delegates.Receive> _receiveActionEffectHook;
 
 	private readonly CastbarInfo _nullCastbarInfo;
 	private Dictionary<uint, DamageType> _actionToDamageTypeDict;
@@ -86,8 +76,11 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 		{
 			_petNicknamesDictionary = DalamudApi.PluginInterface.GetOrCreateData("PetRenamer.GameObjectRenameDict", () => new Dictionary<ulong, string>());
 		}
-		catch { }
-			
+		catch
+		{
+			// ignored
+		}
+
 		_actionToNameDict = new Dictionary<uint, string>();
 		_ignoredCastActions = new HashSet<uint>();
         _actionStore = new ActionEffectStore(_configuration);
@@ -123,17 +116,11 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 					_ignoredCastActions.Add(row.ActionCategory.RowId);
 			}
 
-			var receiveActionEffectFuncPtr = DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? 48 8B 8D ?? ?? ?? ?? 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 00 05 00 00");
-			_receiveActionEffectHook = DalamudApi.Hooks.HookFromAddress<ReceiveActionEffectDelegate>(receiveActionEffectFuncPtr, ReceiveActionEffect);
+			_receiveActionEffectHook = DalamudApi.Hooks.HookFromAddress<ActionEffectHandler.Delegates.Receive>(
+				(nint)ActionEffectHandler.MemberFunctionPointers.Receive, ReceiveActionEffect);
 
-			var addScreenLogPtr = DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? BF ?? ?? ?? ?? EB 39");
-			_addScreenLogHook = DalamudApi.Hooks.HookFromAddress<AddScreenLogDelegate>(addScreenLogPtr, AddScreenLogDetour);
-
-			var setCastBarFuncPtr = DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? 4C 8D 8F ?? ?? ?? ?? 4D 8B C6 48 8B D5");
-			_setCastBarHook = DalamudApi.Hooks.HookFromAddress<SetCastBarDelegate>(setCastBarFuncPtr, SetCastBarDetour);
-
-			var setFocusTargetCastBarFuncPtr = DalamudApi.SigScanner.ScanText("40 53 56 41 54 41 57 48 83 EC 78");
-			_setFocusTargetCastBarHook = DalamudApi.Hooks.HookFromAddress<SetCastBarDelegate>(setFocusTargetCastBarFuncPtr, SetFocusTargetCastBarDetour);
+			_addScreenLogHook = DalamudApi.Hooks.HookFromAddress<BattleLog.Delegates.AddToScreenLogWithScreenLogKind>(
+				(nint)BattleLog.MemberFunctionPointers.AddToScreenLogWithScreenLogKind, AddScreenLogDetour);
 
 			DalamudApi.FlyTextGui.FlyTextCreated += OnFlyTextCreated;
 		}
@@ -146,10 +133,6 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 			_addScreenLogHook?.Dispose();
 			_receiveActionEffectHook?.Disable();
 			_receiveActionEffectHook?.Dispose();
-			_setCastBarHook?.Disable();
-			_setCastBarHook?.Dispose();
-			_setFocusTargetCastBarHook?.Disable();
-			_setFocusTargetCastBarHook?.Dispose();
 			DalamudApi.CommandManager.RemoveHandler(CommandName);
 
 			throw;
@@ -157,8 +140,9 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 
 		_receiveActionEffectHook.Enable();
 		_addScreenLogHook.Enable();
-		_setCastBarHook.Enable();
-		_setFocusTargetCastBarHook.Enable();
+
+		DalamudApi.AddonLifecycle.RegisterListener(AddonEvent.PreRequestedUpdate, [TargetInfoAddonName, TargetInfoSplitAddonName], OnTargetInfoRequestedUpdate);
+		DalamudApi.AddonLifecycle.RegisterListener(AddonEvent.PreRequestedUpdate, FocusTargetInfoAddonName, OnFocusTargetInfoRequestedUpdate);
 
 		DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
 		DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
@@ -202,17 +186,15 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 	public void Dispose()
 	{
 		_actionStore.Dispose();
-		ResetMainTargetCastBar();
-		ResetFocusTargetCastBar();
 		_receiveActionEffectHook?.Disable();
 		_receiveActionEffectHook?.Dispose();
 		_addScreenLogHook?.Disable();
 		_addScreenLogHook?.Dispose();
-		_setCastBarHook?.Disable();
-		_setCastBarHook?.Dispose();
-		_setFocusTargetCastBarHook?.Disable();
-		_setFocusTargetCastBarHook?.Dispose();
 
+		DalamudApi.AddonLifecycle.UnregisterListener(OnTargetInfoRequestedUpdate, OnFocusTargetInfoRequestedUpdate);
+		ResetMainTargetCastBar();
+		ResetFocusTargetCastBar();
+		
 		DalamudApi.FlyTextGui.FlyTextCreated -= OnFlyTextCreated;
 		DalamudApi.Condition.ConditionChange -= OnConditionChanged;
 		
@@ -305,7 +287,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 #region castbar
 	private CastbarInfo GetTargetInfoUiElements()
 	{
-		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName("_TargetInfo").Address;
+		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName(TargetInfoAddonName).Address;
 
 		if (unitBase == null) return _nullCastbarInfo;
 
@@ -319,7 +301,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 
 	private CastbarInfo GetTargetInfoSplitUiElements()
 	{
-		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName("_TargetInfoCastBar").Address;
+		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName(TargetInfoSplitAddonName).Address;
 
 		if (unitBase == null) return _nullCastbarInfo;
 
@@ -333,7 +315,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 
 	private CastbarInfo GetFocusTargetUiElements()
 	{
-		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName("_FocusTargetInfo").Address;
+		var unitBase = (AtkUnitBase*)DalamudApi.GameGui.GetAddonByName(FocusTargetInfoAddonName).Address;
 
 		if (unitBase == null) return _nullCastbarInfo;
 
@@ -356,55 +338,31 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 		GetFocusTargetUiElements().ResetIfValid();
 	}
 
-	private void SetCastBarDetour(nint thisPtr, nint a2, nint a3, nint a4, char a5)
+	private void OnTargetInfoRequestedUpdate(AddonEvent type, AddonArgs args)
 	{
-		if (!_configuration.MainTargetCastBarColorEnabled)
-		{
-			_setCastBarHook.Original(thisPtr, a2, a3, a4, a5);
-			return;
-		}
+		if (!_configuration.MainTargetCastBarColorEnabled) return;
 
-		var targetInfo = GetTargetInfoUiElements();
-		var splitInfo = GetTargetInfoSplitUiElements();
+		var info = args.AddonName == TargetInfoAddonName
+			? GetTargetInfoUiElements()
+			: GetTargetInfoSplitUiElements();
 
-		if (!targetInfo.Valid() && !splitInfo.Valid())
-		{
-			_setCastBarHook.Original(thisPtr, a2, a3, a4, a5);
-			return;
-		}
-
-		var toColor = _nullCastbarInfo;
-		if (thisPtr.ToPointer() == targetInfo.unitBase)
-			toColor = targetInfo;
-		else if (thisPtr.ToPointer() == splitInfo.unitBase)
-			toColor = splitInfo;
-
-		if (toColor != _nullCastbarInfo)
-			ColorCastBar(DalamudApi.TargetManager.Target, toColor, _setCastBarHook, thisPtr, a2, a3, a4, a5);
+		if (info.Valid())
+			ColorCastBar(DalamudApi.TargetManager.Target, info);
 	}
 
-	private void SetFocusTargetCastBarDetour(nint thisPtr, nint a2, nint a3, nint a4, char a5)
+	private void OnFocusTargetInfoRequestedUpdate(AddonEvent type, AddonArgs args)
 	{
-		if (!_configuration.FocusTargetCastBarColorEnabled)
-		{
-			_setFocusTargetCastBarHook.Original(thisPtr, a2, a3, a4, a5);
-			return;
-		}
+		if (!_configuration.FocusTargetCastBarColorEnabled) return;
 
 		var ftInfo = GetFocusTargetUiElements();
 
-		if (thisPtr.ToPointer() != ftInfo.unitBase || !ftInfo.Valid()) return;
-
-		ColorCastBar(DalamudApi.TargetManager.FocusTarget, ftInfo, _setFocusTargetCastBarHook, thisPtr, a2, a3, a4, a5);
+		if (ftInfo.Valid())
+			ColorCastBar(DalamudApi.TargetManager.FocusTarget, ftInfo);
 	}
 
-	private void ColorCastBar(IGameObject target, CastbarInfo info, Hook<SetCastBarDelegate> hook, nint thisPtr, nint a2, nint a3, nint a4, char a5)
+	private void ColorCastBar(IGameObject? target, CastbarInfo info)
 	{
-		if (target == null || target is not IBattleChara battleTarget)
-		{
-			hook.Original(thisPtr, a2, a3, a4, a5);
-			return;
-		}
+		if (target is not IBattleChara battleTarget) return;
 
 		var actionId = battleTarget.CastActionId;
 		_actionToDamageTypeDict.TryGetValue(actionId, out var type);
@@ -412,7 +370,6 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 		if (_ignoredCastActions.Contains(actionId))
 		{
 			info.Reset();
-			hook.Original(thisPtr, a2, a3, a4, a5);
 			return;
 		}
 
@@ -433,7 +390,6 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 		};
 
 		info.Color(castColor, bgColor);
-		hook.Original(thisPtr, a2, a3, a4, a5);
 	}
 #endregion
 
@@ -466,48 +422,46 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 		if (dGameObject == null) return SeString.Empty;
 		if (_petNicknamesDictionary != null)
 		{
-			if (dGameObject.ObjectKind == DObjectKind.BattleNpc && _petNicknamesDictionary.TryGetValue(dGameObject.GameObjectId, out var name)) return name;
+			if (dGameObject.ObjectKind == Dalamud.Game.ClientState.Objects.Enums.ObjectKind.BattleNpc && _petNicknamesDictionary.TryGetValue(dGameObject.GameObjectId, out var name)) return name;
 		}
 		return dGameObject.Name;
     }
 
-	private void ReceiveActionEffect(uint sourceId, Character* sourceCharacter, IntPtr pos, EffectHeader* effectHeader, EffectEntry* effectArray, ulong* effectTail)
+	private void ReceiveActionEffect(
+		uint sourceId,
+		Character* sourceCharacter,
+		Vector3* targetPos,
+		ActionEffectHandler.Header* header,
+		ActionEffectHandler.TargetEffects* effects,
+		GameObjectId* targetIds)
 	{
 		try
 		{
 			_actionStore.Cleanup();
 
-			DebugLog(Effect, $"--- source actor: {sourceCharacter->GameObject.EntityId}, action id {effectHeader->ActionId}, anim id {effectHeader->AnimationId} numTargets: {effectHeader->TargetCount} ---");
+			DebugLog(Effect, $"--- source actor: {sourceCharacter->GameObject.EntityId}, action id {header->ActionId}, anim id {header->SpellId} numTargets: {header->NumTargets} ---");
 
 			// TODO: Reimplement opcode logging, if it's even useful. Original code follows
 			// ushort op = *((ushort*) effectHeader.ToPointer() - 0x7);
 			// DebugLog(Effect, $"--- source actor: {sourceId}, action id {id}, anim id {animId}, opcode: {op:X} numTargets: {targetCount} ---");
 
-			var entryCount = effectHeader->TargetCount switch
-			{
-				0 => 0,
-				1 => 8,
-				<= 8 => 64,
-				<= 16 => 128,
-				<= 24 => 192,
-				<= 32 => 256,
-				_ => 0
-			};
+			var targetCount = header->NumTargets;
 
 			// Check if we have data for this action ID.
 			// Then we can check if the p2 is in the expected value set for positional success.
 			var positionalState = PositionalState.Ignore;
-			var isPositional = _posManager.IsPositional(effectHeader->AnimationId);
+			var isPositional = _posManager.IsPositional(header->SpellId);
 			if (isPositional)
 			{
 				positionalState = PositionalState.Failure;
-				for (int i = 0; i < entryCount; i++)
-					if (effectArray[i].type == ActionEffectType.Damage)
-						if (_posManager.IsPositionalHit(effectHeader->AnimationId, effectArray[i].param2))
-							positionalState = PositionalState.Success;
+				for (int i = 0; i < targetCount; i++)
+					foreach (var effect in effects[i].Effects)
+						if (effect.GetEffectType() == ActionEffectType.Damage)
+							if (_posManager.IsPositionalHit(header->SpellId, effect.Param2))
+								positionalState = PositionalState.Success;
 
 				if (DalamudApi.ObjectTable.LocalPlayer?.EntityId == sourceCharacter->EntityId) {
-					if (positionalState is PositionalState.Success) 
+					if (positionalState is PositionalState.Success)
 					{
 						_positionalsHit++;
 					}
@@ -515,49 +469,55 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 					_positionalsAttempted++;
 				}
 			}
-			
+
 			if (isPositional)
 			{
-				for (int i = 0; i < entryCount; i++)
+				for (int i = 0; i < targetCount; i++)
 				{
-					if (effectArray[i].type == ActionEffectType.Damage && sourceId == GetCharacterActorId())
+					foreach (var effect in effects[i].Effects)
 					{
-						var id = effectHeader->AnimationId;
-						var name = id.ToString();
-						if (_actionToNameDict.TryGetValue(id, out var sheetName))
-							name = $"{sheetName} [{name}]";
-						PositionalLog($"Action: {name} jobLevel: {GetCurrentLevel()} boostPercent: {effectArray[i].param2} positionalState: {positionalState}");
+						if (effect.GetEffectType() == ActionEffectType.Damage && sourceId == GetCharacterActorId())
+						{
+							var id = header->SpellId;
+							var name = id.ToString();
+							if (_actionToNameDict.TryGetValue(id, out var sheetName))
+								name = $"{sheetName} [{name}]";
+							PositionalLog($"Action: {name} jobLevel: {GetCurrentLevel()} boostPercent: {effect.Param2} positionalState: {positionalState}");
+						}
 					}
 				}
 			}
-			
-			for (int i = 0; i < entryCount; i++)
+
+			for (int i = 0; i < targetCount; i++)
 			{
-				if (effectArray[i].type == ActionEffectType.Nothing) continue;
+				ulong target = targetIds[i];
 
-				var target = effectTail[i / 8];
-				uint dmg = effectArray[i].value;
-				if (effectArray[i].mult != 0)
-					dmg += ((uint)ushort.MaxValue + 1) * effectArray[i].mult;
-
-				var dmgType = ((AttackType)effectArray[i].AttackType).ToDamageType();
-				if (effectArray[i].type == ActionEffectType.Heal) dmgType = DamageType.None;
-				DebugLog(Effect, $"{effectArray[i]}, s: {sourceId} t: {target} dmgType {dmgType}");
-
-				var newEffect = new ActionEffectInfo
+				foreach (var effect in effects[i].Effects)
 				{
-					step = ActionStep.Effect,
-					actionId = effectHeader->ActionId,
-					type = effectArray[i].type,
-					damageType = dmgType,
-					// we fill in LogKind later 
-					sourceId = sourceId,
-					targetId = target,
-					value = dmg,
-					positionalState = positionalState
-				};
+					var effectType = effect.GetEffectType();
+					if (effectType == ActionEffectType.Nothing) continue;
 
-				_actionStore.AddEffect(newEffect);
+					var dmg = effect.GetDamage();
+					var dmgType = effect.GetDamageType();
+
+					if (effectType == ActionEffectType.Heal) dmgType = DamageType.None;
+					DebugLog(Effect, $"{effect.ToText()}, s: {sourceId} t: {target} dmgType {dmgType}");
+
+					var newEffect = new ActionEffectInfo
+					{
+						step = ActionStep.Effect,
+						actionId = header->ActionId,
+						type = effectType,
+						damageType = dmgType,
+						// we fill in LogKind later
+						sourceId = sourceId,
+						targetId = target,
+						value = dmg,
+						positionalState = positionalState
+					};
+
+					_actionStore.AddEffect(newEffect);
+				}
 			}
 		}
 		catch (Exception e)
@@ -565,7 +525,7 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 			DalamudApi.PluginLog.Error(e, "An error has occurred in Damage Info.");
 		}
 
-		_receiveActionEffectHook.Original(sourceId, sourceCharacter, pos, effectHeader, effectArray, effectTail);
+		_receiveActionEffectHook.Original(sourceId, sourceCharacter, targetPos, header, effects, targetIds);
 	}
 
 	private int GetCurrentLevel()
@@ -574,40 +534,40 @@ public unsafe class DamageInfoPlugin : IDalamudPlugin
 	}
 
 	private void AddScreenLogDetour(
-		Character* target,
-		Character* source,
-		FlyTextKind logKind,
-		int option,
-		int actionKind,
-		int actionId,
+		BattleChara* target,
+		BattleChara* source,
+		int screenLogKind,
+		byte option,
+		byte actionKind,
+		uint actionId,
 		int val1,
 		int val2,
-		int serverAttackType,
-		int val4)
+		int serverAttackType)
 	{
 		try
 		{
-			var targetId = target->GameObject.EntityId;
-			var sourceId = source->GameObject.EntityId;
+			var targetId = target->EntityId;
+			var sourceId = source->EntityId;
+			var logKind = (FlyTextKind)screenLogKind;
 
 			if (_configuration.DebugLogEnabled)
 			{
 				DebugLog(ScreenLog, $"{option} {actionKind} {actionId}");
-				DebugLog(ScreenLog, $"{val1} {val2} {serverAttackType} {val4}");
+				DebugLog(ScreenLog, $"{val1} {val2} {serverAttackType}");
 				var targetName = GetActorName(targetId);
 				var sourceName = GetActorName(sourceId);
 				DebugLog(ScreenLog, $"src {sourceId} {sourceName}");
 				DebugLog(ScreenLog, $"tgt {targetId} {targetName}");
 			}
 
-			_actionStore.UpdateEffect((uint)actionId, sourceId, targetId, (uint)val1, (uint)serverAttackType, logKind);
+			_actionStore.UpdateEffect(actionId, sourceId, targetId, (uint)val1, (uint)serverAttackType, logKind);
 		}
 		catch (Exception e)
 		{
 			DalamudApi.PluginLog.Error(e, "An error occurred in Damage Info.");
 		}
 
-		_addScreenLogHook.Original(target, source, logKind, option, actionKind, actionId, val1, val2, serverAttackType, val4);
+		_addScreenLogHook.Original(target, source, screenLogKind, option, actionKind, actionId, val1, val2, serverAttackType);
 	}
 
 	private void OnFlyTextCreated(

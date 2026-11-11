@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Dalamud.Game.Gui.FlyText;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace DamageInfoPlugin;
@@ -56,38 +56,24 @@ public unsafe struct CastbarInfo
     public override int GetHashCode() => HashCode.Combine(unchecked((int)(long)unitBase), unchecked((int)(long)gauge), unchecked((int)(long)bg));
 }
 
-[StructLayout(LayoutKind.Explicit)]
-public struct EffectHeader
+public static class EffectExtensions
 {
-    [FieldOffset(8)] public uint ActionId;
-    [FieldOffset(28)] public ushort AnimationId;
-    [FieldOffset(33)] public byte TargetCount;
-}
+    public static ActionEffectType GetEffectType(this ActionEffectHandler.Effect effect) => (ActionEffectType)effect.Type;
+
+    public static AttackType GetAttackType(this ActionEffectHandler.Effect effect) => (AttackType)(byte)(effect.Param1 & 0xF);
     
-public struct EffectEntry
-{
-    public ActionEffectType type;
-    public byte param0;
-    public byte param1;
-    public byte param2;
-    public byte mult;
-    public byte flags;
-    public ushort value;
+    public static DamageType GetDamageType(this ActionEffectHandler.Effect effect) => effect.GetAttackType().ToDamageType();
 
-    public byte AttackType => (byte) (param1 & 0xF);
+    public static uint GetDamage(this ActionEffectHandler.Effect effect) => effect.Value + ((uint)ushort.MaxValue + 1) * effect.Param3;
 
-    public override string ToString()
+    public static string ToText(this ActionEffectHandler.Effect effect)
     {
+        var attackType = effect.GetAttackType();
         return
-            $"Type: {type}, p0: {param0:D3}, p1: {param1:D3}, p2: {param2:D3} 0x{param2:X2} '{Convert.ToString(param2, 2).PadLeft(8, '0')}', mult: {mult:D3}, flags: {flags:D3} | {Convert.ToString(flags, 2).PadLeft(8, '0')}, value: {value:D6} ATTACK TYPE: {AttackType} DAMAGE TYPE: {((AttackType)AttackType).ToDamageType()}";
+            $"Type: {effect.GetEffectType()}, p0: {effect.Param0:D3}, p1: {effect.Param1:D3}, p2: {effect.Param2:D3} 0x{effect.Param2:X2} '{Convert.ToString(effect.Param2, 2).PadLeft(8, '0')}', mult: {effect.Param3:D3}, flags: {effect.Param4:D3} | {Convert.ToString(effect.Param4, 2).PadLeft(8, '0')}, value: {effect.Value:D6} ATTACK TYPE: {attackType} DAMAGE TYPE: {attackType.ToDamageType()}";
     }
 }
 
-public struct EffectTail
-{
-    
-}
-    
 public struct ActionEffectInfo
 {
     public ActionStep step;
